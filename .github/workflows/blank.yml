@@ -1,0 +1,59 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -------------------------------
+# 参数设置
+# -------------------------------
+years = 10000  # 模拟时间 (年)
+dt = 1         # 时间步长 (年)
+time = np.arange(0, years+dt, dt)
+
+# 初始有机碳分配 (假设 100 单位有机碳)
+C0_fast = 0.2 * 100   # 20% 在快库
+C0_mid =  0.3 * 100   # 30% 在中库
+C0_slow = 0.5 * 100   # 50% 在慢库
+
+# 分解速率常数 (/yr) - 假设值
+k_fast = 1e-1   # 快库：0.1 /yr
+k_mid  = 1e-3   # 中库：0.001 /yr
+k_slow = 1e-5   # 慢库：0.00001 /yr
+
+# -------------------------------
+# 初始化数组
+# -------------------------------
+C_fast = np.zeros_like(time, dtype=float)
+C_mid  = np.zeros_like(time, dtype=float)
+C_slow = np.zeros_like(time, dtype=float)
+
+# 初始值
+C_fast[0] = C0_fast
+C_mid[0]  = C0_mid
+C_slow[0] = C0_slow
+
+# -------------------------------
+# 数值积分 (Euler)
+# -------------------------------
+for t in range(1, len(time)):
+    C_fast[t] = C_fast[t-1] - k_fast * C_fast[t-1] * dt
+    C_mid[t]  = C_mid[t-1]  - k_mid  * C_mid[t-1]  * dt
+    C_slow[t] = C_slow[t-1] - k_slow * C_slow[t-1] * dt
+
+# 总有机碳
+C_total = C_fast + C_mid + C_slow
+
+# -------------------------------
+# 绘图
+# -------------------------------
+plt.figure(figsize=(8,5))
+plt.plot(time, C_fast, label="Fast pool")
+plt.plot(time, C_mid, label="Intermediate pool")
+plt.plot(time, C_slow, label="Slow pool")
+plt.plot(time, C_total, 'k--', label="Total OC")
+
+plt.xlabel("Time (years)")
+plt.ylabel("Organic Carbon (arbitrary units)")
+plt.title("Three-pool Organic Carbon Decay and Burial")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
