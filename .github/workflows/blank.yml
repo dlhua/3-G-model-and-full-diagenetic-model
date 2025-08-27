@@ -1,59 +1,454 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from scipy.interpolate import interp1d
+
+# -------------------------------
+# 数据输入部分 - 请替换为您的实际数据
+# -------------------------------
+# 示例数据：深度(cm)和对应的有机碳含量(%)
+# 请将这些替换为您的实际观测数据
+observed_depth = np.array([0, 10, 20, 50, 100, 200, 500, 1000])  # 深度 (cm)
+observed_OC = np.array([2.5, 2.0, 1.6, 1.2, 0.8, 0.5, 0.2, 0.1])  # 有机碳含量 (%)
 
 # -------------------------------
 # 参数设置
 # -------------------------------
-years = 10000  # 模拟时间 (年)
-dt = 1         # 时间步长 (年)
-time = np.arange(0, years+dt, dt)
+# 沉积速率 (假设恒定沉积速率)
+sedimentation_rate = 0.1  # cm/year，请根据您的研究区域调整
 
-# 初始有机碳分配 (假设 100 单位有机碳)
-C0_fast = 0.2 * 100   # 20% 在快库
-C0_mid =  0.3 * 100   # 30% 在中库
-C0_slow = 0.5 * 100   # 50% 在慢库
+# 将深度转换为时间
+observed_time = observed_depth / sedimentation_rate  # 年
 
-# 分解速率常数 (/yr) - 假设值
+# 分解速率常数 (/yr) - 可以根据文献或经验调整
 k_fast = 1e-1   # 快库：0.1 /yr
-k_mid  = 1e-3   # 中库：0.001 /yr
+k_mid  = 1e-3   # 中库：0.001 /yr  
 k_slow = 1e-5   # 慢库：0.00001 /yr
 
 # -------------------------------
-# 初始化数组
+# 正向模型函数
 # -------------------------------
-C_fast = np.zeros_like(time, dtype=float)
-C_mid  = np.zeros_like(time, dtype=float)
-C_slow = np.zeros_like(time, dtype=float)
-
-# 初始值
-C_fast[0] = C0_fast
-C_mid[0]  = C0_mid
-C_slow[0] = C0_slow
+def forward_model(params, time_array):
+    """
+    正向模拟三库有机碳衰减
+    params: [f_fast, f_mid, f_slow, C0_total] 
+            - f_fast, f_mid, f_slow: 各库的分配比例
+            - C0_total: 初始总有机碳含量
+    """
+    f_fast, f_mid, f_slow, C0_total = params
+    
+    # 初始各库碳含量
+    C0_fast = f_fast * C0_total
+    C0_mid = f_mid * C0_total  
+    C0_slow = f_slow * C0_total
+    
+    # 计算各时刻的碳含量
+    C_fast = C0_fast * np.exp(-k_fast * time_array)
+    C_mid = C0_mid * np.exp(-k_mid * time_array)
+    C_slow = C0_slow * np.exp(-k_slow * time_array)
+    
+    # 总有机碳
+    C_total = C_fast + C_mid + C_slow
+    
+    return C_total, C_fast, C_mid, C_slow
 
 # -------------------------------
-# 数值积分 (Euler)
+# 目标函数（最小二乘法）
 # -------------------------------
-for t in range(1, len(time)):
-    C_fast[t] = C_fast[t-1] - k_fast * C_fast[t-1] * dt
-    C_mid[t]  = C_mid[t-1]  - k_mid  * C_mid[t-1]  * dt
-    C_slow[t] = C_slow[t-1] - k_slow * C_slow[t-1] * dt
-
-# 总有机碳
-C_total = C_fast + C_mid + C_slow
+def objective_function(params):
+    """计算模型预测值与观测值之间的误差"""
+    try:
+        # 约束检查
+        f_fast, f_mid, f_slow, C0_total = params
+        
+        # 比例之和必须为1，允许小的数值误差
+        if abs(f_fast + f_mid + f_slow - 1.0) > 1e-6:
+            return 1e10
+        
+        # 比例必须为正
+        if f_fast < 0 or f_mid < 0 or f_slow < 0 or C0_total < 0:
+            return 1e10
+            
+        # 正向模拟
+        predicted_OC, _, _, _ = forward_model(params, observed_time)
+        
+        # 计算均方根误差
+        rmse = np.sqrt(np.mean((predicted_OC - observed_OC)**2))
+        
+        return rmse
+        
+    except:
+        return 1e10
 
 # -------------------------------
-# 绘图
+# 约束条件
 # -------------------------------
-plt.figure(figsize=(8,5))
-plt.plot(time, C_fast, label="Fast pool")
-plt.plot(time, C_mid, label="Intermediate pool")
-plt.plot(time, C_slow, label="Slow pool")
-plt.plot(time, C_total, 'k--', label="Total OC")
+# 等式约束：f_fast + f_mid + f_slow = 1
+def constraint_sum_to_one(params):
+    return params[0] + params[1] + params[2] - 1.0
 
-plt.xlabel("Time (years)")
-plt.ylabel("Organic Carbon (arbitrary units)")
-plt.title("Three-pool Organic Carbon Decay and Burial")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+constraints = {'type': 'eq', 'fun': constraint_sum_to_one}
+
+# 参数边界 (比例在0-1之间，初始碳含量为正)
+bounds = [(0, 1), (0, 1), (0, 1), (0, 10)]
+
+# -------------------------------
+# 反演优化
+# -------------------------------
+# 初始猜测值
+initial_guess = [0.3, 0.3, 0.4, np.mean(observed_OC)]
+
+print("开始反演分析...")
+print(f"观测数据点数: {len(observed_OC)}")
+print(f"初始猜测值: f_fast={initial_guess[0]:.3f}, f_mid={initial_guess[1]:.3f}, f_slow={initial_guess[2]:.3f}, C0={initial_guess[3]:.3f}")
+
+# 执行优化
+result = minimize(objective_function, 
+                 initial_guess,
+                 method='SLSQP',
+                 bounds=bounds,
+                 constraints=constraints,
+                 options={'maxiter': 1000, 'ftol': 1e-9})
+
+# -------------------------------
+# 结果分析
+# -------------------------------
+if result.success:
+    optimal_params = result.x
+    f_fast_opt, f_mid_opt, f_slow_opt, C0_total_opt = optimal_params
+    
+    print("\n反演成功！")
+    print(f"最优参数:")
+    print(f"  快库比例 (f_fast): {f_fast_opt:.3f} ({f_fast_opt*100:.1f}%)")
+    print(f"  中库比例 (f_mid):  {f_mid_opt:.3f} ({f_mid_opt*100:.1f}%)")
+    print(f"  慢库比例 (f_slow): {f_slow_opt:.3f} ({f_slow_opt*100:.1f}%)")
+    print(f"  初始总碳含量:      {C0_total_opt:.3f}")
+    print(f"  最终RMSE:         {result.fun:.4f}")
+#RMSE是"Root Mean Square Error"的缩写，中文叫做"均方根误差"，是衡量模型预测值与实际观测值之间差异的一个重要指标。
+    
+    # 使用最优参数进行正向模拟
+    time_fine = np.linspace(0, max(observed_time), 200)
+    C_total_opt, C_fast_opt, C_mid_opt, C_slow_opt = forward_model(optimal_params, time_fine)
+    C_total_obs_fit, _, _, _ = forward_model(optimal_params, observed_time)
+    
+    # -------------------------------
+    # 结果可视化
+    # -------------------------------
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    
+    # 上图：拟合结果对比
+    ax1.plot(observed_time, observed_OC, 'ro', markersize=8, label='观测数据')
+    ax1.plot(time_fine, C_total_opt, 'b-', linewidth=2, label='拟合曲线')
+    ax1.plot(observed_time, C_total_obs_fit, 'g+', markersize=10, markeredgewidth=2, label='拟合点')
+    ax1.set_xlabel('时间 (年)')
+    ax1.set_ylabel('有机碳含量')
+    ax1.set_title(f'有机碳反演拟合结果 (RMSE = {result.fun:.4f})')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 下图：各库贡献
+    ax2.plot(time_fine, C_fast_opt, 'r-', label=f'快库 ({f_fast_opt*100:.1f}%)')
+    ax2.plot(time_fine, C_mid_opt, 'g-', label=f'中库 ({f_mid_opt*100:.1f}%)')  
+    ax2.plot(time_fine, C_slow_opt, 'b-', label=f'慢库 ({f_slow_opt*100:.1f}%)')
+    ax2.plot(time_fine, C_total_opt, 'k--', linewidth=2, label='总和')
+    ax2.set_xlabel('时间 (年)')
+    ax2.set_ylabel('有机碳含量')
+    ax2.set_title('各库分解曲线')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 输出各深度的预测值
+    print(f"\n深度-有机碳对比:")
+    print(f"{'深度(cm)':>8} {'观测值':>8} {'预测值':>8} {'残差':>8}")
+    print("-" * 35)
+    for i in range(len(observed_depth)):
+        residual = C_total_obs_fit[i] - observed_OC[i]
+        print(f"{observed_depth[i]:>8.1f} {observed_OC[i]:>8.2f} {C_total_obs_fit[i]:>8.2f} {residual:>8.3f}")
+        
+else:
+    print(f"\n反演失败: {result.message}")
+    print("请检查:")
+    print("1. 数据质量和格式")
+    print("2. 分解速率常数是否合理")
+    print("3. 沉积速率是否正确")
+    print("4. 尝试不同的初始猜测值")
+
+# -------------------------------
+# 敏感性分析
+# -------------------------------
+def sensitivity_analysis():
+    """
+    对分解速率常数和沉积速率进行敏感性分析
+    """
+    print("\n" + "="*50)
+    print("开始敏感性分析...")
+    print("="*50)
+    
+    if not result.success:
+        print("主要反演失败，跳过敏感性分析")
+        return
+    
+    # 原始最优参数作为参考
+    base_params = result.x
+    base_rmse = result.fun
+    
+    # 敏感性分析结果存储
+    sensitivity_results = {
+        'parameter': [],
+        'variation': [],
+        'f_fast': [],
+        'f_mid': [],
+        'f_slow': [],
+        'C0_total': [],
+        'rmse': [],
+        'relative_change': []
+    }
+    
+    # 1. 分解速率常数敏感性分析
+    print("\n1. 分解速率常数敏感性分析")
+    print("-" * 40)
+    
+    # 变化幅度 (±10%, ±20%, ±50%)
+    variations = [0.5, 0.8, 0.9, 1.1, 1.2, 2.0]
+    variation_labels = ['-50%', '-20%', '-10%', '+10%', '+20%', '+100%']
+    
+    # 分析每个速率常数
+    rate_params = {
+        'k_fast': k_fast,
+        'k_mid': k_mid, 
+        'k_slow': k_slow
+    }
+    
+    for param_name, base_value in rate_params.items():
+        print(f"\n{param_name} 敏感性 (基准值: {base_value:.1e}):")
+        print(f"{'变化':>8} {'f_fast':>8} {'f_mid':>8} {'f_slow':>8} {'C0':>8} {'RMSE':>8} {'变化%':>8}")
+        
+        for var, var_label in zip(variations, variation_labels):
+            # 临时修改参数
+            if param_name == 'k_fast':
+                k_temp = (var * k_fast, k_mid, k_slow)
+            elif param_name == 'k_mid':
+                k_temp = (k_fast, var * k_mid, k_slow)
+            else:  # k_slow
+                k_temp = (k_fast, k_mid, var * k_slow)
+            
+            # 重新定义目标函数（使用临时参数）
+            def temp_objective(params):
+                try:
+                    f_fast, f_mid, f_slow, C0_total = params
+                    if abs(f_fast + f_mid + f_slow - 1.0) > 1e-6:
+                        return 1e10
+                    if f_fast < 0 or f_mid < 0 or f_slow < 0 or C0_total < 0:
+                        return 1e10
+                    
+                    # 使用临时分解速率
+                    k_fast_t, k_mid_t, k_slow_t = k_temp
+                    C0_fast = f_fast * C0_total
+                    C0_mid = f_mid * C0_total  
+                    C0_slow = f_slow * C0_total
+                    
+                    C_fast = C0_fast * np.exp(-k_fast_t * observed_time)
+                    C_mid = C0_mid * np.exp(-k_mid_t * observed_time)
+                    C_slow = C0_slow * np.exp(-k_slow_t * observed_time)
+                    C_total = C_fast + C_mid + C_slow
+                    
+                    return np.sqrt(np.mean((C_total - observed_OC)**2))
+                except:
+                    return 1e10
+            
+            # 执行优化
+            temp_result = minimize(temp_objective, base_params, method='SLSQP',
+                                 bounds=bounds, constraints=constraints,
+                                 options={'maxiter': 500, 'ftol': 1e-8})
+            
+            if temp_result.success:
+                f_fast_t, f_mid_t, f_slow_t, C0_t = temp_result.x
+                rmse_change = ((temp_result.fun - base_rmse) / base_rmse) * 100
+                
+                print(f"{var_label:>8} {f_fast_t:>8.3f} {f_mid_t:>8.3f} {f_slow_t:>8.3f} {C0_t:>8.3f} {temp_result.fun:>8.4f} {rmse_change:>+7.1f}")
+                
+                # 存储结果
+                sensitivity_results['parameter'].append(param_name)
+                sensitivity_results['variation'].append(var_label)
+                sensitivity_results['f_fast'].append(f_fast_t)
+                sensitivity_results['f_mid'].append(f_mid_t) 
+                sensitivity_results['f_slow'].append(f_slow_t)
+                sensitivity_results['C0_total'].append(C0_t)
+                sensitivity_results['rmse'].append(temp_result.fun)
+                sensitivity_results['relative_change'].append(rmse_change)
+            else:
+                print(f"{var_label:>8} {'优化失败':>40}")
+    
+    # 2. 沉积速率敏感性分析
+    print(f"\n\n2. 沉积速率敏感性分析")
+    print("-" * 40)
+    print(f"沉积速率 (基准值: {sedimentation_rate} cm/yr):")
+    print(f"{'变化':>8} {'f_fast':>8} {'f_mid':>8} {'f_slow':>8} {'C0':>8} {'RMSE':>8} {'变化%':>8}")
+    
+    for var, var_label in zip(variations, variation_labels):
+        temp_sed_rate = var * sedimentation_rate
+        temp_time = observed_depth / temp_sed_rate
+        
+        # 重新定义目标函数
+        def temp_sed_objective(params):
+            try:
+                f_fast, f_mid, f_slow, C0_total = params
+                if abs(f_fast + f_mid + f_slow - 1.0) > 1e-6:
+                    return 1e10
+                if f_fast < 0 or f_mid < 0 or f_slow < 0 or C0_total < 0:
+                    return 1e10
+                
+                C0_fast = f_fast * C0_total
+                C0_mid = f_mid * C0_total  
+                C0_slow = f_slow * C0_total
+                
+                C_fast = C0_fast * np.exp(-k_fast * temp_time)
+                C_mid = C0_mid * np.exp(-k_mid * temp_time)
+                C_slow = C0_slow * np.exp(-k_slow * temp_time)
+                C_total = C_fast + C_mid + C_slow
+                
+                return np.sqrt(np.mean((C_total - observed_OC)**2))
+            except:
+                return 1e10
+        
+        temp_result = minimize(temp_sed_objective, base_params, method='SLSQP',
+                             bounds=bounds, constraints=constraints,
+                             options={'maxiter': 500, 'ftol': 1e-8})
+        
+        if temp_result.success:
+            f_fast_t, f_mid_t, f_slow_t, C0_t = temp_result.x
+            rmse_change = ((temp_result.fun - base_rmse) / base_rmse) * 100
+            
+            print(f"{var_label:>8} {f_fast_t:>8.3f} {f_mid_t:>8.3f} {f_slow_t:>8.3f} {C0_t:>8.3f} {temp_result.fun:>8.4f} {rmse_change:>+7.1f}")
+            
+            sensitivity_results['parameter'].append('sed_rate')
+            sensitivity_results['variation'].append(var_label)
+            sensitivity_results['f_fast'].append(f_fast_t)
+            sensitivity_results['f_mid'].append(f_mid_t)
+            sensitivity_results['f_slow'].append(f_slow_t)
+            sensitivity_results['C0_total'].append(C0_t)
+            sensitivity_results['rmse'].append(temp_result.fun)
+            sensitivity_results['relative_change'].append(rmse_change)
+        else:
+            print(f"{var_label:>8} {'优化失败':>40}")
+    
+    # 3. 敏感性分析可视化
+    print(f"\n\n3. 绘制敏感性分析图...")
+    
+    # 转换为numpy数组便于处理
+    sens_data = {}
+    for key, values in sensitivity_results.items():
+        sens_data[key] = np.array(values)
+    
+    if len(sens_data['parameter']) > 0:
+        # 创建敏感性分析图
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # 参数分组
+        params_list = ['k_fast', 'k_mid', 'k_slow', 'sed_rate']
+        colors = ['red', 'green', 'blue', 'orange']
+        param_labels = ['k_fast', 'k_mid', 'k_slow', 'Sed. Rate']
+        
+        # 图1：f_fast敏感性
+        for i, param in enumerate(params_list):
+            mask = sens_data['parameter'] == param
+            if np.any(mask):
+                variations_num = np.arange(len(sens_data['variation'][mask]))
+                ax1.plot(variations_num, sens_data['f_fast'][mask], 
+                        'o-', color=colors[i], label=param_labels[i], markersize=6)
+                ax1.set_xticks(variations_num)
+                ax1.set_xticklabels(sens_data['variation'][mask], rotation=45)
+        ax1.axhline(y=base_params[0], color='black', linestyle='--', alpha=0.7, label='基准值')
+        ax1.set_title('快库比例 (f_fast) 敏感性')
+        ax1.set_ylabel('f_fast')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 图2：f_slow敏感性
+        for i, param in enumerate(params_list):
+            mask = sens_data['parameter'] == param
+            if np.any(mask):
+                variations_num = np.arange(len(sens_data['variation'][mask]))
+                ax2.plot(variations_num, sens_data['f_slow'][mask], 
+                        'o-', color=colors[i], label=param_labels[i], markersize=6)
+                ax2.set_xticks(variations_num)
+                ax2.set_xticklabels(sens_data['variation'][mask], rotation=45)
+        ax2.axhline(y=base_params[2], color='black', linestyle='--', alpha=0.7, label='基准值')
+        ax2.set_title('慢库比例 (f_slow) 敏感性')
+        ax2.set_ylabel('f_slow')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 图3：RMSE敏感性
+        for i, param in enumerate(params_list):
+            mask = sens_data['parameter'] == param
+            if np.any(mask):
+                variations_num = np.arange(len(sens_data['variation'][mask]))
+                ax3.plot(variations_num, sens_data['rmse'][mask], 
+                        'o-', color=colors[i], label=param_labels[i], markersize=6)
+                ax3.set_xticks(variations_num)
+                ax3.set_xticklabels(sens_data['variation'][mask], rotation=45)
+        ax3.axhline(y=base_rmse, color='black', linestyle='--', alpha=0.7, label='基准值')
+        ax3.set_title('RMSE 敏感性')
+        ax3.set_ylabel('RMSE')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 图4：相对变化百分比
+        for i, param in enumerate(params_list):
+            mask = sens_data['parameter'] == param
+            if np.any(mask):
+                variations_num = np.arange(len(sens_data['variation'][mask]))
+                ax4.plot(variations_num, sens_data['relative_change'][mask], 
+                        'o-', color=colors[i], label=param_labels[i], markersize=6)
+                ax4.set_xticks(variations_num)
+                ax4.set_xticklabels(sens_data['variation'][mask], rotation=45)
+        ax4.axhline(y=0, color='black', linestyle='--', alpha=0.7)
+        ax4.set_title('RMSE相对变化 (%)')
+        ax4.set_ylabel('相对变化 (%)')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # 4. 敏感性总结
+        print(f"\n\n4. 敏感性分析总结")
+        print("="*50)
+        
+        # 找出最敏感的参数
+        max_rmse_change = np.max(np.abs(sens_data['relative_change']))
+        max_idx = np.argmax(np.abs(sens_data['relative_change']))
+        most_sensitive = sens_data['parameter'][max_idx]
+        
+        print(f"最敏感参数: {most_sensitive}")
+        print(f"最大RMSE变化: {max_rmse_change:.1f}%")
+        
+        # 参数稳定性评估
+        for param in params_list:
+            mask = sens_data['parameter'] == param
+            if np.any(mask):
+                param_changes = sens_data['relative_change'][mask]
+                avg_change = np.mean(np.abs(param_changes))
+                max_change = np.max(np.abs(param_changes))
+                print(f"{param:>10}: 平均变化 {avg_change:.1f}%, 最大变化 {max_change:.1f}%")
+        
+        print(f"\n建议:")
+        if max_rmse_change < 10:
+            print("- 反演结果对参数变化相对稳定")
+        elif max_rmse_change < 50:
+            print("- 反演结果对某些参数较为敏感，建议仔细校准")
+        else:
+            print("- 反演结果对参数变化非常敏感，建议:")
+            print("  1. 收集更多约束数据")
+            print("  2. 进行参数联合反演")
+            print("  3. 使用贝叶斯方法考虑参数不确定性")
+    
+    else:
+        print("敏感性分析数据不足，无法绘图")
+
+# 执行敏感性分析
+sensitivity_analysis()
